@@ -44,6 +44,8 @@ _JS_IMPORT = re.compile(
 
 
 def _iter_sources(project: Path):
+    """Yield reviewable source files under *project*, skipping caches,
+    VCS, virtualenv, and vendored/generated trees (see ``SKIP_DIRS``)."""
     for p in sorted(project.rglob("*")):
         if p.is_dir() or p.suffix not in SOURCE_SUFFIXES:
             continue
@@ -65,6 +67,7 @@ def _py_full_name(rel: str):
 
 
 def _first_token(part: str):
+    """First name in one comma-separated import part, or ``None``."""
     part = part.strip().strip("()").strip()
     if not part or part.startswith("#"):
         return None
@@ -109,6 +112,7 @@ def _py_candidates(text: str, importer_rel: str) -> set:
 
 
 def _js_targets(importer: Path, project: Path):
+    """Project-relative paths a JS/TS file's relative imports may resolve to."""
     try:
         text = importer.read_text(encoding="utf-8", errors="replace")
     except OSError:

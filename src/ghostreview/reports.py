@@ -28,6 +28,11 @@ _STATUS_WORD = {"added": "new file", "modified": "modified",
 
 
 def write_reports(report: dict, out_dir) -> tuple:
+    """Write ``review.json`` and ``REVIEW.md`` to *out_dir*.
+
+    Creates *out_dir* if needed and returns ``(json_path, md_path)``.
+    Both files come from the same *report* dict, so their numbers agree.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     json_path = out / "review.json"
@@ -39,6 +44,13 @@ def write_reports(report: dict, out_dir) -> tuple:
 
 
 def render_markdown(report: dict) -> str:
+    """Render *report* as the plain-English ``REVIEW.md`` text.
+
+    Sections: verdict (with a plain-words gloss), what changed,
+    dependents affected, risks, Verify and Scope citations, notes,
+    and honest limits. Missing optional reports are stated as
+    missing, never implied to have run.
+    """
     t = report.get("totals") or {}
     lines = [
         "# GhostReview",
@@ -120,6 +132,15 @@ def render_markdown(report: dict) -> str:
     scope = report.get("scope") or {}
     if scope.get("present"):
         lines.append(f"- GhostScope pack was provided (`{scope.get('path')}`).")
+        if scope.get("pack_files") is not None \
+                or scope.get("pack_tokens_estimate") is not None:
+            bits = []
+            if scope.get("pack_files") is not None:
+                bits.append(f"{scope['pack_files']} file(s) in the pack")
+            if scope.get("pack_tokens_estimate") is not None:
+                bits.append(f"{scope['pack_tokens_estimate']} pack tokens "
+                            "estimated by GhostScope")
+            lines.append("  Pack size as recorded: " + ", ".join(bits) + ".")
         by_file = scope.get("risk_reasons_by_file") or {}
         if by_file:
             for fpath in sorted(by_file):
@@ -131,6 +152,52 @@ def render_markdown(report: dict) -> str:
                 lines.append(f"  Scope risk reason: {reason}.")
         if not (scope.get("risk_reasons") or []):
             lines.append("  The pack recorded no risk reasons in scope.json.")
+        rec = scope.get("reconciliation") or {}
+        if rec:
+            if rec.get("scope_files_recorded"):
+                lines.append(
+                    f"  Scope reconciliation: {len(rec.get('matched') or [])} "
+                    "file(s) appear in both the pack's changed-file list "
+                    "and this diff"
+                    + (f"; listed only in the pack: "
+                       + ", ".join(f"`{p}`" for p in rec["only_in_scope"])
+                       if rec.get("only_in_scope") else "")
+                    + (f"; in this diff only: "
+                       + ", ".join(f"`{p}`" for p in rec["only_in_diff"])
+                       if rec.get("only_in_diff") else "")
+                    + ". This compares the two supplied lists only; "
+                      "it is not a risk flag.")
+            else:
+                lines.append("  The pack recorded no changed-file list, "
+                             "so no file-by-file comparison with this "
+                             "diff was made.")
+        order = scope.get("reading_order") or []
+        if order:
+            lines.append("  Scope reading order: " + ", ".join(
+                f"{e.get('order')}. `{e.get('path')}`"
+                + (f" ({e['mode']})" if e.get("mode") else "")
+                for e in order) + ".")
+        detail_paths = sorted(
+            set(scope.get("changed_symbols_by_file") or {})
+            | set(scope.get("covering_tests_by_file") or {})
+            | set(scope.get("direct_callers_by_file") or {}))
+        for fpath in detail_paths:
+            bits = []
+            syms = (scope.get("changed_symbols_by_file") or {}).get(fpath)
+            if syms:
+                bits.append("changed symbols recorded: "
+                            + ", ".join(f"`{s}`" for s in syms))
+            if fpath in (scope.get("covering_tests_by_file") or {}):
+                tests = scope["covering_tests_by_file"][fpath]
+                bits.append("covering tests recorded: "
+                            + (", ".join(f"`{t}`" for t in tests)
+                               if tests else "none"))
+            callers = (scope.get("direct_callers_by_file") or {}).get(fpath)
+            if callers is not None:
+                bits.append(f"direct callers recorded: {callers}")
+            if bits:
+                lines.append(f"  Scope detail for `{fpath}`: "
+                             + "; ".join(bits) + ".")
     else:
         lines.append("- No GhostScope pack was provided. This review is "
                      "written from the diff alone; GhostScope builds the "

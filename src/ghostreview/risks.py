@@ -26,7 +26,11 @@ _DEPENDENCY_NAMES = {"pyproject.toml", "requirements.txt", "Pipfile",
                      "Pipfile.lock", "poetry.lock", "package.json",
                      "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
                      "Cargo.toml", "Cargo.lock", "go.mod", "go.sum"}
-_SECRET_PATH_RE = re.compile(r"(^|/)(\.env($|\.)|.*credentials.*|.*secret.*|"
+# "secret"/"credentials" must be a whole name token (end of path or
+# followed by a separator), not the prefix of a longer ordinary word:
+# secretary.py is not secret-shaped and must not draw a high flag.
+_SECRET_PATH_RE = re.compile(r"(^|/)(\.env($|\.)|.*credentials?(?=$|[/._-])|"
+                             r".*secrets?(?=$|[/._-])|"
                              r"id_rsa|id_ed25519)", re.I)
 _SECRET_EXTS = {".pem", ".key", ".p12", ".pfx", ".keystore"}
 # Secret line shapes mirror GhostSlice's canonical guard list
@@ -56,10 +60,12 @@ _BARE_40 = re.compile(r"\b[A-Za-z0-9/+=]{40}\b")
 
 
 def is_test_path(path: str) -> bool:
+    """True when *path* looks like a test file (drives ``TEST-EDIT``)."""
     return bool(_TEST_RE.search(path or ""))
 
 
 def is_config_path(path: str) -> bool:
+    """True when *path* looks like config or a dependency manifest."""
     name = Path(path or "").name
     if name in _CONFIG_NAMES or name in _DEPENDENCY_NAMES:
         return True
@@ -95,7 +101,8 @@ def flag_risks(changes, symbols_by_path: dict, dependents: dict,
                 "a dependency manifest or lockfile changed")
         elif is_config_path(path):
             add("medium", "CONFIG", path, "a configuration file changed")
-        if _SECRET_PATH_RE.search(path) or Path(path).suffix in _SECRET_EXTS:
+        if _SECRET_PATH_RE.search(path) \
+                or Path(path).suffix.lower() in _SECRET_EXTS:
             add("high", "SECRET-PATH", path,
                 "the changed path is secret-shaped (env, credentials, or "
                 "key material by name or extension); its contents are not "
@@ -162,6 +169,11 @@ def flag_risks(changes, symbols_by_path: dict, dependents: dict,
 
 
 def verdict_for(flags: list) -> str:
+    """Derive the verdict from *flags* only: any high flag means
+    ``needs-attention``, any medium means ``needs-a-look``, otherwise
+    ``straightforward``. (Empty input is handled earlier, in core,
+    as ``could-not-review``; it never reaches here as a clean verdict.)
+    """
     levels = {f["level"] for f in flags}
     if "high" in levels:
         return "needs-attention"

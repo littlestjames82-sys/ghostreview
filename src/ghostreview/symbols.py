@@ -27,6 +27,7 @@ _PY_DEF = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(|^\s*class\s+([
 
 
 def _lite_defs(texts):
+    """Definition names matched by the parser-lite patterns in *texts*."""
     names = []
     for _no, text in texts:
         for pat in _LITE_PATTERNS:
@@ -38,6 +39,7 @@ def _lite_defs(texts):
 
 
 def _py_defs_from_lines(texts):
+    """Python ``def``/``class`` names found in raw diff line *texts*."""
     names = []
     for _no, text in texts:
         m = _PY_DEF.match(text)

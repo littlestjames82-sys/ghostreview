@@ -54,9 +54,11 @@ of a diff file) also requires `git` on PATH.
 ```bash
 # Review a diff file
 ghostreview review ~/my-project --diff agent.diff -o /tmp/review-out
+status=$?   # capture it now: running cat first would replace $?
+            # 0 straightforward/needs-a-look, 1 needs-attention,
+            # 2 could-not-review
 cat /tmp/review-out/REVIEW.md
-echo $?   # 0 straightforward/needs-a-look, 1 needs-attention,
-          # 2 could-not-review
+echo "exit: $status"
 
 # Review your own uncommitted changes (git diff HEAD)
 ghostreview review ~/my-project -o /tmp/review-out
@@ -66,7 +68,26 @@ ghostreview review ~/my-project --diff agent.diff \
   --verify-report /tmp/bundle/verify-report.json \
   --scope-pack /tmp/review-pack \
   -o /tmp/review-out
+
+# Preview without writing files, or print machine-readable JSON
+# (handy in CI; combine --no-report with --json for JSON only)
+ghostreview review ~/my-project --diff agent.diff --no-report
+git diff HEAD | ghostreview review ~/my-project --diff - --no-report --json
 ```
+
+### Choosing a diff source
+
+Pick exactly one source per review:
+
+| Source | Use it when |
+|---|---|
+| `--diff <file>` | You already saved a diff, for example an agent's patch. `--diff -` reads the diff from stdin instead. |
+| *(no flag)* | You want your working tree against `HEAD`: staged and unstaged tracked changes together. Untracked files are listed as a note, never reviewed. |
+| `--staged` | You want staged changes only (`git diff --cached`). |
+
+The `<project>` argument is always the project root the diff
+belongs to, whichever source you pick: symbols and dependents are
+looked up there. The project tree is never modified.
 
 A worked walkthrough lives in [`examples/`](examples/README.md).
 
@@ -75,7 +96,7 @@ A worked walkthrough lives in [`examples/`](examples/README.md).
 | Command | What it does |
 |---|---|
 | `ghostreview review <project> [--diff <file.diff> \| --staged] [--verify-report <path>] [--scope-pack <pack-dir\|scope.json>] [-o <out-dir>] [--json] [--no-report]` | Review a diff and write `REVIEW.md` + `review.json` to the output directory (default: the current directory). The default diff source is the git working tree against HEAD; `--staged` uses staged changes only; `--diff -` reads the diff from stdin. The project tree is never modified. |
-| `ghostreview mcp` | Stdio MCP server (local only) exposing `review_diff` with a capped summary payload, no raw file bodies and no diff text. |
+| `ghostreview mcp` | Stdio MCP server (local only) exposing `review_diff` with a capped summary payload, no raw file bodies and no diff text. `review_diff` requires `project`; `diff`, `staged`, `verify_report`, and `scope_pack` are optional and mean the same as the CLI flags. |
 
 ## Verdict and exit codes
 
@@ -129,6 +150,18 @@ supplied, the review says "No GhostVerify report was provided"
 and claims no check ran. A supplied but unreadable report is
 named as unreadable, never silently dropped.
 
+A supplied Scope pack is cited in full, not just for its risk
+reasons: the review also reports the pack's recorded reading
+order, per-file changed symbols, covering tests and direct
+caller counts, and its recorded pack size, all copied from
+scope.json. It also reconciles the pack's changed-file list
+against the diff being reviewed, naming any files listed only
+in the pack or only in the diff. That comparison is a cited
+fact about the two inputs (a pack may have been built for a
+different range): it is never a risk flag and never changes
+the verdict. If the pack records no changed-file list, the
+review says no comparison was made rather than inventing one.
+
 ## Limits, stated plainly
 
 - **Static evidence only.** "No risks flagged by these rules"
@@ -142,6 +175,28 @@ named as unreadable, never silently dropped.
   design. GhostScope's pack is the tool for blast radius.
 - **No causes, intent, or quality judgements.** The review
   states what changed and what the rules flagged, nothing more.
+
+## Troubleshooting
+
+- **`could-not-review` (exit 2).** The diff was empty or could not
+  be parsed into file changes. Check that the diff file exists and
+  really is a unified diff, or, for a working-tree review, that
+  there are tracked changes against `HEAD`. This verdict is never
+  a clean pass.
+- **"could not run git diff" / "git diff failed".** The default and
+  `--staged` sources need `git` on PATH and `<project>` inside a
+  git repository. Outside a repository, save a diff and pass it
+  with `--diff <file>` instead.
+- **"could not read diff file" (exit 2).** The `--diff` path could
+  not be read. Check the path; `-` alone means stdin.
+- **A supplied report is named as unreadable.** A `--verify-report`
+  or `--scope-pack` that cannot be read is named in the review's
+  notes, never silently dropped. Fix the path (a Scope pack may be
+  the pack directory or its `scope.json`) and re-run.
+- **No dependents listed, but you expected one.** The scan is one
+  hop and import-shaped only: dynamic, runtime, and string-based
+  references are missed by design. Use a GhostScope pack for blast
+  radius.
 
 ## Out of scope (v0.1)
 

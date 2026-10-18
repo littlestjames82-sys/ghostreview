@@ -17,6 +17,42 @@ from .inputs import load_scope_pack, load_verify_report
 from .risks import flag_risks, verdict_for
 from .symbols import symbols_for_change
 
+def reconcile_scope(scope: dict, diff_paths) -> dict | None:
+    """Compare a supplied Scope pack's changed-file list to the diff.
+
+    Pure set comparison of two supplied/recorded lists: which files
+    appear in both, which are listed only in the pack, and which are
+    in the diff only. No judgement is attached: a mismatch is a
+    cited fact about the two inputs (the pack may have been built
+    for a different range), never a risk flag, and it never changes
+    the verdict. Returns None when no pack was supplied, and a
+    record with ``scope_files_recorded`` False when the pack lists
+    no changed files at all, so no comparison is claimed from an
+    absent list.
+    """
+    if not scope.get("present"):
+        return None
+    scope_files = list(scope.get("changed_files") or [])
+    diff_files = sorted(set(diff_paths or []))
+    if not scope_files:
+        return {"scope_files_recorded": False, "matched": [],
+                "only_in_scope": [], "only_in_diff": [],
+                "scope_file_count": 0, "diff_file_count": len(diff_files)}
+    scope_set, diff_set = set(scope_files), set(diff_files)
+    return {"scope_files_recorded": True,
+            "matched": sorted(scope_set & diff_set),
+            "only_in_scope": sorted(scope_set - diff_set),
+            "only_in_diff": sorted(diff_set - scope_set),
+            "scope_file_count": len(scope_set),
+            "diff_file_count": len(diff_set)}
+
+
+def _name_list(names, cap=5) -> str:
+    shown = ", ".join(names[:cap])
+    more = len(names) - cap
+    return shown + (f", and {more} more" if more > 0 else "")
+
+
 HONESTY = ("this review summarises static evidence from the diff only; "
            "'no risks flagged by these rules' is not a guarantee that "
            "a change is safe, and the verdict is a summary, not a "
@@ -27,6 +63,27 @@ def build_review(project, diff_text: str, diff_source: str,
                  verify_report: str | None = None,
                  scope_pack: str | None = None,
                  extra_notes: list | None = None) -> dict:
+    """Build the review report dict for one diff.
+
+    Args:
+        project: Project root the diff belongs to; read (never written)
+            for symbol and one-hop dependent lookups.
+        diff_text: Unified diff text; empty or unparseable text yields
+            a ``could-not-review`` report with exit code 2, never a
+            clean verdict.
+        diff_source: Label recorded as ``diff_source`` (for example
+            ``file:<path>``, ``stdin``, or ``git:working-tree-vs-HEAD``).
+        verify_report: Optional path to a GhostVerify
+            ``verify-report.json`` to cite, not re-run.
+        scope_pack: Optional GhostScope pack directory or its
+            ``scope.json`` to cite, not rebuild.
+        extra_notes: Notes already gathered by the caller (for example
+            untracked files from ``git status``), copied into the report.
+
+    Returns:
+        The report dict that ``reports.write_reports`` serialises to
+        ``review.json`` and renders as ``REVIEW.md``.
+    """
     project_path = Path(project)
     notes = list(extra_notes or [])
     verify = load_verify_report(verify_report)
@@ -36,6 +93,9 @@ def build_review(project, diff_text: str, diff_source: str,
             notes.append(rec["unreadable"])
 
     changes = parse_diff(diff_text) if diff_text else []
+    reconciliation = reconcile_scope(scope, [c.path for c in changes])
+    if reconciliation is not None:
+        scope = {**scope, "reconciliation": reconciliation}
     base = {
         "tool": "ghostreview", "version": __version__, "kind": "review",
         "project": str(project_path), "diff_source": diff_source,
@@ -99,6 +159,7 @@ def build_review(project, diff_text: str, diff_source: str,
 
 def _summary(totals, change_rows, dependents, risks, verdict,
              verify, scope) -> str:
+    """Template the one-paragraph verdict summary from counted facts only."""
     parts = []
     status_bits = []
     for key, label in (("added_files", "added"), ("modified_files", "modified"),
@@ -156,5 +217,19 @@ def _summary(totals, change_rows, dependents, risks, verdict,
         parts.append(f"A GhostScope pack was provided for this change"
                      + (f" with {n} risk reason(s) recorded in scope.json."
                         if n else "."))
+        rec = scope.get("reconciliation") or {}
+        if rec.get("scope_files_recorded"):
+            sentence = (
+                f"The pack's changed-file list and this diff agree on "
+                f"{len(rec['matched'])} file(s)")
+            if rec["only_in_scope"]:
+                sentence += (f"; {len(rec['only_in_scope'])} file(s) are "
+                             f"listed only in the pack "
+                             f"({_name_list(rec['only_in_scope'])})")
+            if rec["only_in_diff"]:
+                sentence += (f"; {len(rec['only_in_diff'])} file(s) are "
+                             f"in this diff only "
+                             f"({_name_list(rec['only_in_diff'])})")
+            parts.append(sentence + ".")
     parts.append(f"Verdict: {verdict}.")
     return " ".join(parts)

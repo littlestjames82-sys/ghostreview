@@ -21,7 +21,7 @@ DEPENDENT_CAP = 50
 
 TOOLS = [
     {"name": "review_diff",
-     "description": "Plain-English verdict summary of a change: what changed, symbols touched, one-hop dependents, risk flags, and citations of a supplied GhostVerify report / GhostScope pack. Static evidence only, no file bodies.",
+     "description": "Plain-English verdict summary of a change: what changed, symbols touched, one-hop dependents, risk flags, and citations of a supplied GhostVerify report / GhostScope pack. Static evidence only, no file bodies, no diff text. Translation only: it invents no findings and approves nothing. 'project' is required; 'diff' is a diff file path ('-' for stdin), otherwise the git working tree is used, or staged changes when 'staged' is true.",
      "inputSchema": {"type": "object",
                      "properties": {"project": {"type": "string"},
                                     "diff": {"type": "string"},
@@ -33,6 +33,12 @@ TOOLS = [
 
 
 def _capped(report: dict) -> dict:
+    """Copy *report* with risks, changes, and dependents capped.
+
+    Truncation is marked with ``*_truncated`` / ``*_total`` fields so
+    a caller can tell the payload was capped. No diff text or file
+    bodies are ever added.
+    """
     out = dict(report)
     risks = out.get("risks") or []
     if len(risks) > RISK_CAP:
@@ -66,6 +72,7 @@ def _capped(report: dict) -> dict:
 
 
 def _review_diff(args) -> dict:
+    """Run one ``review_diff`` call: diff from a file, or from git."""
     notes = []
     if args.get("diff"):
         text, source = diff_from_file(args["diff"])
@@ -79,6 +86,7 @@ def _review_diff(args) -> dict:
 
 
 def _dispatch(request: dict):
+    """Handle one JSON-RPC request; notifications return ``None``."""
     method = request.get("method", "")
     params = request.get("params") or {}
     if method == "initialize":
@@ -104,6 +112,7 @@ def _dispatch(request: dict):
 
 
 def serve(stdin=None, stdout=None) -> int:
+    """Serve newline-delimited JSON-RPC on stdio until EOF; returns 0."""
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     for line in stdin:
@@ -113,6 +122,17 @@ def serve(stdin=None, stdout=None) -> int:
         try:
             request = json.loads(line)
         except ValueError:
+            continue
+        if not isinstance(request, dict):
+            # Valid JSON but not a request object: answer with an
+            # invalid-request error instead of dying on .get and
+            # taking the whole server down with it.
+            resp = {"jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32600,
+                              "message": "invalid request: expected "
+                                         "a JSON object"}}
+            stdout.write(json.dumps(resp) + "\n")
+            stdout.flush()
             continue
         try:
             result = _dispatch(request)

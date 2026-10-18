@@ -32,6 +32,8 @@ _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 @dataclass
 class Hunk:
+    """One ``@@`` hunk: its starting line numbers and counted lines."""
+
     old_start: int
     old_count: int
     new_start: int
@@ -50,11 +52,18 @@ class Hunk:
 
 @dataclass
 class FileChange:
+    """One file's change in a diff: paths, status, hunks, and modes."""
+
     old_path: str | None = None
     new_path: str | None = None
     status: str = "modified"  # added | modified | deleted | renamed | copied
     hunks: list = field(default_factory=list)
     is_binary: bool = False
+    # True when the --- / +++ header for that side was /dev/null,
+    # i.e. the file did not exist on that side of the change. Kept
+    # separately from the paths because both are None then.
+    saw_old_null: bool = False
+    saw_new_null: bool = False
     old_mode: str | None = None
     new_mode: str | None = None
 
@@ -106,7 +115,9 @@ def _c_unquote(raw: str) -> str:
                         and raw[j] in "01234567":
                     digits += raw[j]
                     j += 1
-                out.append(int(digits, 8))
+                # Git only emits byte values (\000-\377); a malformed
+                # escape above that must not crash the parse.
+                out.append(int(digits, 8) % 256)
                 i = j
                 continue
             if nxt in simple:
@@ -119,15 +130,27 @@ def _c_unquote(raw: str) -> str:
 
 
 def _clean_path(raw: str):
-    raw = raw.strip()
+    """Normalise a diff path: ``/dev/null`` to None, drop the ``a/``/``b/``
+    prefix and any tab suffix, and C-unquote a quoted path."""
+    # The tab split comes first: traditional diff -u headers carry a
+    # timestamp after a tab, and "/dev/null\t<timestamp>" must still
+    # be recognised as /dev/null, not as a path named "/dev/null".
+    raw = raw.strip().split("\t")[0].strip()
     if raw == "/dev/null":
         return None
-    raw = raw.split("\t")[0].strip()
     if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
         raw = _c_unquote(raw[1:-1])
     if raw.startswith(("a/", "b/")):
         raw = raw[2:]
     return raw
+
+
+def _maybe_quoted_path(raw: str):
+    """Path from a rename/copy header line: C-unquote it when git
+    quoted it, otherwise take it verbatim (these lines carry no
+    a/ or b/ prefix)."""
+    raw = raw.strip()
+    return _clean_path(raw) if raw.startswith('"') else raw
 
 
 def _git_header_paths(line: str):
@@ -178,6 +201,12 @@ def _git_header_paths(line: str):
 
 
 def parse_diff(text: str) -> list:
+    """Parse unified *text* into a list of :class:`FileChange`.
+
+    Accepts git diffs and header-less ``---``/``+++`` diffs. Text with
+    no recognisable file changes returns an empty list; callers treat
+    that as could-not-review, not as a clean change.
+    """
     changes: list = []
     cur: FileChange | None = None
     cur_hunk: Hunk | None = None
@@ -198,7 +227,9 @@ def parse_diff(text: str) -> list:
         if cur is None:
             # Tolerate diffs without the git header (---/+++ only).
             if line.startswith("--- "):
-                cur = FileChange(old_path=_clean_path(line[4:]))
+                first = _clean_path(line[4:])
+                cur = FileChange(old_path=first,
+                                 saw_old_null=first is None)
                 changes.append(cur)
             continue
         if line.startswith("new file"):
@@ -220,23 +251,19 @@ def parse_diff(text: str) -> list:
             cur.new_mode = line[len("new mode "):].strip()
             continue
         if line.startswith("rename from "):
-            cur.old_path = _clean_path(line[len("rename from "):]) \
-                if line[len("rename from "):].strip().startswith('"') \
-                else line[len("rename from "):].strip()
+            cur.old_path = _maybe_quoted_path(line[len("rename from "):])
             cur.status = "renamed"
             continue
         if line.startswith("rename to "):
-            cur.new_path = _clean_path(line[len("rename to "):]) \
-                if line[len("rename to "):].strip().startswith('"') \
-                else line[len("rename to "):].strip()
+            cur.new_path = _maybe_quoted_path(line[len("rename to "):])
             cur.status = "renamed"
             continue
         if line.startswith("copy from "):
-            cur.old_path = line[len("copy from "):].strip()
+            cur.old_path = _maybe_quoted_path(line[len("copy from "):])
             cur.status = "copied"
             continue
         if line.startswith("copy to "):
-            cur.new_path = line[len("copy to "):].strip()
+            cur.new_path = _maybe_quoted_path(line[len("copy to "):])
             cur.status = "copied"
             continue
         if line.startswith("Binary files") or line.startswith("GIT binary patch"):
@@ -264,8 +291,12 @@ def parse_diff(text: str) -> list:
                 if line.startswith("--- "):
                     if p is not None:
                         cur.old_path = p
+                    else:
+                        cur.saw_old_null = True
                 elif p is not None:
                     cur.new_path = p
+                else:
+                    cur.saw_new_null = True
                 continue
             # Not a header: fall through to hunk content handling.
         m = _HUNK.match(line)
@@ -296,6 +327,13 @@ def parse_diff(text: str) -> list:
             old_no += 1
     # Normalise status for header-less / minimal diffs.
     for c in changes:
+        # A /dev/null header side is explicit evidence the file was
+        # created or deleted, even when the diff carries no git
+        # "new file"/"deleted file" line (plain diff -u output).
+        if c.saw_new_null and c.old_path and c.status == "modified":
+            c.status = "deleted"
+        elif c.saw_old_null and c.new_path and c.status == "modified":
+            c.status = "added"
         if c.status == "modified" and c.old_path and c.new_path \
                 and c.old_path != c.new_path:
             # ---/+++ name change without an explicit rename header.
